@@ -1,0 +1,29 @@
+# ================= 개인정보 / 비밀 =================
+# API 키가 들어있는 환경 파일은 절대 커밋하지 않는다.
+# (.env.example 은 키 없는 템플릿이라 커밋 대상 유지)
+.env
+.env.*
+!.env.example
+
+# ================= Python =================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+
+# 가상환경
+.venv/
+venv/
+
+# ================= 에이전트 생성물 (요청 내역 등 포함 가능) =================
+libs/workspace/*
+!libs/workspace/.gitkeep
+
+# ================= OS / IDE / 로그 =================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
