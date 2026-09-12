@@ -1,7 +1,8 @@
 """파이프라인 단계별 Agent.
 
-OpenRouter(OpenAI 호환 API)를 사용하며, workspace 파일 도구와 셸 테스트 도구를
-호출한다. 모든 Agent는 emit(event_type, payload) 콜백으로 TUI에 로그를 전달한다.
+OpenRouter(OpenAI 호환 API)를 사용하며 workspace 파일 도구와 셸 테스트 도구를
+호출한다. 각 에이전트는 실행 결과를 emit("chat", <작성자>, <내용>) 으로
+내보내어 채팅방에 대화 메시지로 기록되게 한다.
 """
 import re
 
@@ -30,6 +31,10 @@ class Agent:
 
     def log(self, msg):
         self.emit("log", f"[{self.name}] {msg}")
+
+    def chat_msg(self, content):
+        """채팅방에 이 에이전트의 메시지로 기록."""
+        self.emit("chat", self.name, content)
 
     def system_prompt(self) -> str:
         if self.prompt_file is None:
@@ -62,9 +67,13 @@ class Analyzer(Agent):
 
     def run(self, ctx: dict) -> dict:
         self.log("요청 분석 시작")
-        out = self.chat(f"사용자 요청:\n{ctx['request']}")
+        user = f"사용자 요청:\n{ctx['request']}"
+        history = ctx.get("chat_history", "").strip()
+        if history:
+            user += f"\n\n[이 방에서 방금 전까지의 대화]\n{history}"
+        out = self.chat(user)
         ctx["analysis"] = out
-        self.log("분석 완료")
+        self.chat_msg(f"✅ 요청 분석 완료\n\n{out.strip()[:600]}")
         return {"analysis": out}
 
 
@@ -77,7 +86,8 @@ class Planner(Agent):
         user = f"사용자 요청:\n{ctx['request']}\n\n분석 결과:\n{ctx.get('analysis', '')}"
         out = self.chat(user)
         ctx["plan"] = out
-        self.log("계획 수립 완료")
+        self.chat_msg(f"✅ 구현 계획 수립 완료\n\n{out.strip()[:600]}")
+        return {"plan": out}
 class Coder(Agent):
     name = "Coder"
     prompt_file = "coder.txt"
@@ -102,7 +112,8 @@ class Coder(Agent):
             self.log("⚠️ Coder가 파일 블록을 생성하지 못했습니다 (원본 응답 기록).")
             ctx["coder_raw"] = out
         ctx["written_files"] = written
-        self.log(f"코드 작성 완료 ({len(written)}개 파일)")
+        summary = "\n".join(f"- {rel}" for rel in written) or "- (생성/수정된 파일 없음)"
+        self.chat_msg(f"✅ 코드 구현 완료 ({len(written)}개 파일)\n\n{summary}")
         return {"written_files": written, "raw": out}
 
 
@@ -130,14 +141,11 @@ class Tester(Agent):
         result = tools.run_command(cmd, timeout=config.TEST_TIMEOUT)
         ctx["test"] = result
         ctx["test_command"] = cmd
-        self.log(f"테스트 완료 (exit={result['exit_code']})")
-        if result["stdout"].strip():
-            self.log(f"[stdout] {result['stdout'][-800:].strip()}")
-        if result["stderr"].strip():
-            self.log(f"[stderr] {result['stderr'][-800:].strip()}")
+        tail = (result["stdout"] or result["stderr"])[-500:].strip() or "(출력 없음)"
+        self.chat_msg(
+            f"✅ 테스트 실행 완료\n명령: {cmd}\nexit code: {result['exit_code']}\n\n{tail}"
+        )
         return result
-
-
 class Reviewer(Agent):
     name = "Reviewer"
     prompt_file = "reviewer.txt"
@@ -158,7 +166,7 @@ class Reviewer(Agent):
         verdict = "PASS" if re.search(r"VERDICT:\s*PASS", out, re.IGNORECASE) else "FAIL"
         ctx["review"] = out
         ctx["verdict"] = verdict
-        self.log(f"검토 완료: VERDICT={verdict}")
+        self.chat_msg(f"🔎 구현 검토 완료 — VERDICT: {verdict}\n\n{out.strip()[:600]}")
         return {"verdict": verdict, "review": out}
 
 
@@ -187,7 +195,8 @@ class Fixer(Agent):
             written.append(rel)
             self.log(f"수정 파일: {rel}")
         ctx["fixed_files"] = written
-        self.log(f"수정 완료 ({len(written)}개 파일)")
+        summary = "\n".join(f"- {rel}" for rel in written) or "- (수정된 파일 없음)"
+        self.chat_msg(f"🔧 문제 수정 완료 ({len(written)}개 파일)\n\n{summary}")
         return {"fixed_files": written}
 
 
@@ -209,6 +218,5 @@ class Finalizer(Agent):
         )
         out = self.chat(user)
         ctx["summary"] = out
-        self.log("최종 요약 완료")
+        self.chat_msg(f"🏁 최종 요약\n\n{out.strip()}")
         return {"summary": out}
-        return {"plan": out}

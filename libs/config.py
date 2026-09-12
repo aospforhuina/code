@@ -19,7 +19,11 @@ MAX_FIX_ATTEMPTS = int(os.getenv("MAX_FIX_ATTEMPTS", "5"))
 TEST_TIMEOUT = int(os.getenv("TEST_TIMEOUT", "300"))
 
 # --- 경로 ---
-WORKSPACE_DIR = BASE_DIR / "workspace"
+# 프로젝트 루트 = agent.sh 가 있는 디렉터리 (libs 의 상위)
+ROOT_DIR = BASE_DIR.parent
+
+# 작업 결과물: 루트 workspace/ 아래에 채팅방별로 저장 (workspace/<방ID>/)
+WORKSPACE_DIR = ROOT_DIR / "workspace"
 PROMPTS_DIR = BASE_DIR / "prompts"
 
 WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
