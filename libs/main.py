@@ -195,15 +195,29 @@ class ChatRoomView(Screen):
             self._add_bubble("System", "⚠️ .env에 OPENROUTER_API_KEY가 없어 API 호출이 실패할 수 있습니다.")
         self.prompt.focus()
 
-    # --- 파이프라인 요청 ---
+    # --- 파이프라인 요청 / PO 질문 답변 ---
     def on_input_submitted(self, event: Input.Submitted):
         text = event.value.strip()
-        if not text or self._app.pipeline is not None:
+        if not text:
             return
+        p = self._app.pipeline
+        # PO(또는 어느 에이전트)의 질문에 답변
+        if p is not None and p.waiting_for_answer and p.chat_id == self.chat_id:
+            p.respond(text)
+            event.input.value = ""
+            self.prompt.disabled = True
+            return
+        if p is not None:
+            return  # 실행 중(질문 대기 아님)이면 무시
+        self._start_pipeline(text)
+
+    def _start_pipeline(self, text: str):
+        self.prompt.value = ""
         self.prompt.disabled = True
         # 이전 대화를 짧게 요약해 다음 작업의 맥락으로 넘긴다
         msgs = chats.load_messages(self.chat_id)
         history = "\n".join(f"[{m['author']}] {m['content'][:200]}" for m in msgs[-6:])
+        self._app.pipeline_chat_id = self.chat_id
         self._app.pipeline = Pipeline(
             text,
             chat_id=self.chat_id,
@@ -229,14 +243,22 @@ class ChatRoomView(Screen):
     def show_activity(self, msg: str):
         self.activity.update(msg)
 
+    def show_question(self):
+        """PO(또는 에이전트)의 질문이 왔을 때 입력을 활성화."""
+        self.prompt.disabled = False
+        self.prompt.placeholder = "🤔 PO 질문에 답변하세요 (Enter)..."
+        self.prompt.focus()
+
     def show_steps(self, name: str, state: str):
         self.steps_view.set_state(name, state)
 
     def show_done(self):
         self._app.pipeline = None
+        self._app.pipeline_chat_id = None
         info = chats.get_info(self.chat_id)
         self._app.title = info.get("title") or chats.DEFAULT_TITLE
         self.prompt.disabled = False
+        self.prompt.placeholder = "메시지를 입력하세요 (Enter 로 실행)..."
         self.prompt.focus()
 
     # --- 방 전환 / 이름 수정 ---
@@ -335,6 +357,7 @@ class PipelineApp(App):
         super().__init__()
         self.queue: Queue = Queue()
         self.pipeline = None
+        self.pipeline_chat_id: str | None = None
         self.active_chat: str | None = None
 
     def on_mount(self):
@@ -368,6 +391,8 @@ class PipelineApp(App):
             room.show_steps(ev[1], DONE)
         elif kind == "step_fail":
             room.show_steps(ev[1], FAILED)
+        elif kind == "question":
+            room.show_question()
         elif kind == "error":
             room.show_chat("System", f"🚨 오류\n{ev[1]}")
         elif kind == "done":

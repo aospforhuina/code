@@ -9,7 +9,7 @@ import config
 # 읽기에서 제외할 디렉터리/파일
 SKIP_DIRS = {".venv", "node_modules", "__pycache__", ".git", ".env", ".pytest_cache"}
 
-# Coder/Fixer 가 출력하는 파일 블록 형식
+# DevA/DevB/DevC/Fixer 가 출력하는 파일 블록 형식
 FILE_RE = re.compile(r"=== FILE: (.+?) ===\r?\n(.*?)\r?\n=== END FILE ===", re.DOTALL)
 
 

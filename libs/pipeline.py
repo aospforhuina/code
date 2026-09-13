@@ -1,12 +1,17 @@
-"""고정 파이프라인 오케스트레이션.
+"""고정 파이프라인 오케스트레이션 (엔터프라이즈).
 
-Analyzer → Planner → Coder → (Tester → Reviewer → Fixer 반복) → Finalizer
-Fixer 는 문제가 없거나 최대 MAX_FIX_ATTEMPTS 회에 도달할 때까지 반복한다.
+CEO(사용자)
+→ PO      : 인터랙티브 질의응답(최대 PO_MAX_QUESTIONS)으로 니즈 도출 → PRD 명세서
+→ Architect : 시스템 구조/클린 아키텍처/폴더 구조/기술스택 설계
+→ DevA/DevB/DevC : 백엔드 분업 구현
+→ QA      : 품질 검수 + 테스트 실행 + 예외상황 검증
+→ (실패 시 Fixer → QA 반복, 최대 MAX_FIX_ATTEMPTS)
+→ Finalizer : CEO 최종 보고
 
-채팅방(chat_id)이 주어지면:
-- 사용자 요청과 에이전트 메시지를 해당 방의 messages.jsonl 에 기록
-- 그 방 전용 workspace 로 전환해 다른 작업과 파일이 섞이지 않게 한다
+채팅방(chat_id)이 주어지면 사용자 요청과 에이전트 메시지를 해당 방에 기록하고,
+방 전용 workspace 로 전환해 다른 작업과 파일이 섞이지 않게 한다.
 """
+import threading
 import traceback
 
 import agents
@@ -15,8 +20,8 @@ import config
 
 # TUI 에 표시할 고정 단계 순서
 STEPS = [
-    "Analyzer", "Planner", "Coder",
-    "Tester", "Reviewer", "Fixer", "Finalizer",
+    "PO", "Architect", "DevA", "DevB", "DevC",
+    "QA", "Fixer", "Finalizer",
 ]
 
 
@@ -29,6 +34,10 @@ class Pipeline:
         self.context = {"request": request}
         if chat_history.strip():
             self.context["chat_history"] = chat_history.strip()
+        # 인터랙티브 Q&A 상태
+        self._answer_event = threading.Event()
+        self._answer: str | None = None
+        self._waiting = False
 
     # --- emit: 채팅 메시지는 저장소에도 기록 후 전달 ---
     def emit(self, *args):
@@ -39,6 +48,28 @@ class Pipeline:
                 pass
         self._emit_cb(*args)
 
+    # --- 인터랙티브: PO 가 CEO(사용자)에게 질문 ---
+    def ask(self, question: str) -> str:
+        """질문을 채팅+UI 으로 내보내고 사용자 답변을 기다린다."""
+        self.emit("chat", "PO", f"❓ {question}")
+        self._waiting = True
+        self._answer_event.clear()
+        self.emit("question", question)
+        self._answer_event.wait()
+        self._waiting = False
+        return self._answer or ""
+
+    def respond(self, answer: str):
+        """TUI 에서 사용자가 답변을 입력했을 때 호출."""
+        if self._waiting:
+            self._answer = answer
+            self.emit("chat", "나", answer)
+            self._answer_event.set()
+
+    @property
+    def waiting_for_answer(self) -> bool:
+        return self._waiting
+
     def run(self):
         """스레드에서 호출. 예외는 잡아서 emit 으로 보고하고 done 을 보낸다."""
         try:
@@ -47,10 +78,11 @@ class Pipeline:
         except Exception as e:  # noqa: BLE001
             self.emit("error", f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
         finally:
+            self._waiting = False
             self._emit_cb("done", self.context.get("summary", "파이프라인 완료"))
 
     def _prepare_room(self):
-        """채팅방 제목/전용 workspace 설정 + 사용자 메시지 기록."""
+        """채팅방 제목/전용 workspace 설정 + 사용자 지시 메시지 기록."""
         if not self.chat_id:
             return
         if chats.get_title(self.chat_id) == chats.DEFAULT_TITLE:
@@ -71,34 +103,37 @@ class Pipeline:
         return result
 
     def _run(self):
-        analyzer = agents.Analyzer(self.emit)
-        planner = agents.Planner(self.emit)
-        coder = agents.Coder(self.emit)
-        tester = agents.Tester(self.emit)
-        reviewer = agents.Reviewer(self.emit)
+        po = agents.PO(self.emit)
+        architect = agents.Architect(self.emit)
+        deva = agents.DevA(self.emit)
+        devb = agents.DevB(self.emit)
+        devc = agents.DevC(self.emit)
+        qa = agents.QA(self.emit)
         fixer = agents.Fixer(self.emit)
         finalizer = agents.Finalizer(self.emit)
+        self.context["_ask"] = self.ask  # PO 가 인터랙티브 질문에 사용
 
-        self.emit("activity", "사용자 요청을 분석하는 중...")
-        self._step("Analyzer", lambda: analyzer.run(self.context))
+        self.emit("activity", "PO가 CEO 니즈를 파악하기 위해 질문합니다...")
+        self._step("PO", lambda: po.run(self.context))
 
-        self.emit("activity", "구현 계획을 수립하는 중...")
-        self._step("Planner", lambda: planner.run(self.context))
+        self.emit("activity", "아키텍트가 시스템 설계 중...")
+        self._step("Architect", lambda: architect.run(self.context))
 
-        self.emit("activity", "코드를 작성하는 중...")
-        self._step("Coder", lambda: coder.run(self.context))
+        self.emit("activity", "백엔드 개발자 DevA 작업 중...")
+        self._step("DevA", lambda: deva.run(self.context))
+        self.emit("activity", "백엔드 개발자 DevB 작업 중...")
+        self._step("DevB", lambda: devb.run(self.context))
+        self.emit("activity", "백엔드 개발자 DevC 작업 중...")
+        self._step("DevC", lambda: devc.run(self.context))
 
-        # Fixer → Tester 반복 (최대 MAX_FIX_ATTEMPTS 회)
+        # QA → (실패 시 Fixer) 반복
         fix_count = 0
         while True:
-            self.emit("activity", "테스트를 실행하는 중...")
-            test = self._step("Tester", lambda: tester.run(self.context))
+            self.emit("activity", "QA가 품질 검수를 진행 중...")
+            result = self._step("QA", lambda: qa.run(self.context))
 
-            self.emit("activity", "구현 결과를 검토하는 중...")
-            review = self._step("Reviewer", lambda: reviewer.run(self.context))
-
-            if review.get("verdict") == "PASS" and test.get("exit_code") == 0:
-                self.emit("chat", "System", "✅ 검토 통과 및 테스트 성공.")
+            if result.get("verdict") == "PASS":
+                self.emit("chat", "System", "✅ QA 검수 통과.")
                 break
 
             if fix_count >= config.MAX_FIX_ATTEMPTS:
@@ -107,8 +142,8 @@ class Pipeline:
                 break
 
             fix_count += 1
-            self.emit("activity", f"문제 발견. 코드 수정 중... ({fix_count}/{config.MAX_FIX_ATTEMPTS})")
+            self.emit("activity", f"QA 지적사항 수정 중... ({fix_count}/{config.MAX_FIX_ATTEMPTS})")
             self._step("Fixer", lambda: fixer.run(self.context))
 
-        self.emit("activity", "최종 결과를 요약하는 중...")
+        self.emit("activity", "최종 CEO 보고서 작성 중...")
         self._step("Finalizer", lambda: finalizer.run(self.context))
