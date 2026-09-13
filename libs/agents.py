@@ -1,12 +1,17 @@
-"""파이프라인 단계별 Agent (엔터프라이즈).
+"""파이프라인 단계별 Agent (엔터프라이즈, JSON 기반).
 
 CEO(사용자) → PO/PM(니즈 도출·명세서) → Architect(기술설계)
-→ DevA/DevB/DevC(백엔드 분업 구현) → QA(검수·예외검증) → Fixer(보완) → Finalizer(보고)
+→ Dev(백엔드 구현) → QA(검수·예외검증) → Fixer(보완) → Finalizer(보고)
 
-각 에이전트는 결과를 emit("chat", <작성자>, <내용>) 으로 내보내 채팅방에 기록된다.
-PO 는 CEO(사용자)와 인터랙티브 질의응답을 하며, 질문은 emit("question", ...) 로 보내고
-Pipeline.respond() 로 답변을 받는다 (ctx["_ask"]).
+- 프롬프트: libs/prompt/<작업AI>.json (role/mission/rules/output_schema). 
+  시스템 프롬프트로 렌더링되어 모델 출력을 JSON 스키마로 강제한다.
+- 응답: 각 에이전트는 output_schema 의 JSON을 반환하며, _parse_json_response() 로
+  안정적으로 파싱한다 (파싱 실패 시 자연어 폴백으로 예외 없이 진행).
+- PO 는 CEO(사용자)와 인터랙티브 질의응답을 하며, 질문은 emit("question", ...) 로
+  보내고 Pipeline.respond() 로 답변을 받는다 (ctx["_ask"]).
 """
+import ast
+import json
 import re
 
 from openai import OpenAI
@@ -14,12 +19,9 @@ from openai import OpenAI
 import config
 import tools
 
-PRD_RE = re.compile(r"=== PRD ===\s*\n(.*?)\n=== END PRD ===", re.DOTALL)
-QA_REPO_RE = re.compile(r"=== QA_REPORT ===\s*\n(.*?)\n=== END QA_REPORT ===", re.DOTALL)
-
 
 class Agent:
-    """공통 베이스: OpenAI 호환 클라이언트 + 프롬프트 파일 로드 + emit."""
+    """공통 베이스: OpenAI 호환 클라이언트 + JSON 프롬프트 렌더링 + emit."""
 
     name = "Agent"
     prompt_file = None
@@ -40,10 +42,33 @@ class Agent:
     def chat_msg(self, content):
         self.emit("chat", self.name, content)
 
-    def system_prompt(self) -> str:
+    def prompt_data(self) -> dict:
+        """libs/prompt/<이름>.json 를 읽어 dict 로 반환."""
         if self.prompt_file is None:
+            return {}
+        try:
+            return json.loads((config.PROMPTS_DIR / self.prompt_file).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def system_prompt(self) -> str:
+        """JSON 프롬프트를 사람이 읽을 수 있는 시스템 프롬프트로 렌더링."""
+        data = self.prompt_data()
+        if not data:
             return ""
-        return (config.PROMPTS_DIR / self.prompt_file).read_text(encoding="utf-8")
+        lines = [f"역할: {data.get('role', self.name)}"]
+        mission = data.get("mission")
+        if mission:
+            lines.append(f"임무: {mission}")
+        rules = data.get("rules") or []
+        if rules:
+            lines.append("규칙:")
+            lines += [f"- {rule}" for rule in rules]
+        schema = data.get("output_schema")
+        if schema:
+            lines.append("출력 형식: 반드시 아래 스키마의 JSON 문서 하나만 출력하고, 그 외 텍스트·주석·마크다운은 붙이지 않는다.")
+            lines.append(json.dumps(schema, ensure_ascii=False, indent=2))
+        return "\n".join(lines)
 
     def chat(self, user_text: str, system: str | None = None) -> str:
         if system is None:
@@ -58,6 +83,48 @@ class Agent:
         )
         return resp.choices[0].message.content or ""
 
+    def chat_stream(self, user_text: str, system: str | None = None) -> str:
+        """스트리밍 호출.
+
+        토큰이 도착하면 emit("stream", 이름, 조각) 으로 실시간 출력되고,
+        사고 모델의 reasoning 은 emit("think", 이름, 조각) 으로 전달된다.
+        작업 시작/종료는 emit("work_start"/"work_end", 이름). 실패 시 비스트리밍 폴백.
+        """
+        if system is None:
+            system = self.system_prompt()
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": user_text})
+        self.emit("work_start", self.name)
+        try:
+            stream = self.client.chat.completions.create(
+                model=config.MODEL, messages=messages, stream=True,
+            )
+            parts = []
+            for chunk in stream:
+                if not getattr(chunk, "choices", None):
+                    continue
+                delta = chunk.choices[0].delta
+                reason = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                if reason:
+                    self.emit("think", self.name, reason)
+                content = getattr(delta, "content", None)
+                if content:
+                    parts.append(content)
+                    self.emit("stream", self.name, content)
+            return "".join(parts)
+        except Exception as e:  # noqa: BLE001 - 스트리밍 미지원 등 → 일반 호출
+            self.log(f"스트리밍 불가, 일반 호출로 폴백: {type(e).__name__}")
+            return self.chat(user_text, system=system)
+        finally:
+            self.emit("work_end", self.name)
+
+    def ask_llm(self, user_text: str, system: str | None = None) -> str:
+        """스트리밍 설정에 따라 응답을 받아온다 (테스트에서 패치하기 쉬운 경로)."""
+        return self.chat_stream(user_text, system=system) if config.STREAMING \
+            else self.chat(user_text, system=system)
+
 
 def _format_files(files: dict) -> str:
     if not files:
@@ -65,14 +132,53 @@ def _format_files(files: dict) -> str:
     return "\n".join(f"--- {rel} ---\n{content}" for rel, content in files.items())
 
 
-def _write_blocks(out: str, ctx: dict, key: str) -> list[str]:
-    """파일 블록 파싱 후 workspace 에 저장."""
+def _parse_json_response(text: str) -> dict:
+    """LLM 응답에서 JSON 을 최대한 추출 (실패 시 빈 dict → 자연어 폴백).
+
+    1) 그대로 파싱 → 2) 코드펜스 제거 후 파싱 → 3) 첫 {...} 블록 추출 → 4) 파이썬 리터럴.
+    """
+    text = (text or "").strip()
+    try:
+        val = json.loads(text)
+        return val if isinstance(val, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        pass
+    cleaned = re.sub(r"```(?:json)?\s*|\s*```", "", text).strip()
+    if cleaned and cleaned != text:
+        try:
+            val = json.loads(cleaned)
+            return val if isinstance(val, dict) else {}
+        except json.JSONDecodeError:
+            pass
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if m:
+        try:
+            val = json.loads(m.group(0))
+            return val if isinstance(val, dict) else {}
+        except json.JSONDecodeError:
+            pass
+    try:
+        val = ast.literal_eval(text)
+        return val if isinstance(val, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _files_from(data: dict) -> list[tuple[str, str]]:
+    """JSON 의 files 배열 → [(path, content)] 리스트."""
+    out = []
+    for f in data.get("files") or []:
+        if isinstance(f, dict) and f.get("path"):
+            out.append((str(f["path"]), str(f.get("content", ""))))
+    return out
+
+
+def _write_blocks(blocks: list[tuple[str, str]], ctx: dict, key: str) -> list[str]:
+    """(경로, 내용) 목록을 workspace 에 저장."""
     written = []
-    for rel, content in tools.parse_file_blocks(out):
+    for rel, content in blocks:
         tools.write_file(rel, content)
         written.append(rel)
-    if not written:
-        ctx[f"{key}_raw"] = out
     ctx[key] = written
     return written
 
@@ -81,12 +187,11 @@ class PO(Agent):
     """PO/PM: CEO(사용자)와 진득한 질의응답(min~max) → 니즈 도출 → PRD 명세서."""
 
     name = "PO"
-    prompt_file = "PO.txt"
+    prompt_file = "PO.json"
 
     def run(self, ctx: dict) -> dict:
         self.log("CEO 니즈 파악을 위한 질의응답 시작")
         ask = ctx.get("_ask")
-        min_q = config.PO_MIN_QUESTIONS
         max_q = config.PO_MAX_QUESTIONS
         history = ""
         out = ""
@@ -94,32 +199,31 @@ class PO(Agent):
             user = (
                 f"CEO 지시:\n{ctx['request']}\n\n"
                 f"최근 대화:\n{ctx.get('chat_history', '')}\n\n"
+                f"지금까지 질문 수: {len(ctx.get('answers', []))}\n"
                 f"지금까지의 질문/답변:\n{history or '(없음)'}"
             )
-            out = self.chat(user).strip()
-            m = PRD_RE.search(out)
-            n_asked = len(ctx.get("answers", []))
-            if m and n_asked >= min_q:
-                break  # 최소 질문 횟수를 채운 뒤에만 PRD 수용
-            if m:
-                # 너무 일찍 PRD 를 내면 추가 질문을 유도
-                question = f"아직 질문이 최소 {min_q}회에 못 미칩니다. 이제 진짜 필요한 추가 질문을 하나만 해주세요."
-            else:
-                question = out.splitlines()[0].strip() or "조금 더 구체적으로 알려주세요."
+            out = self.ask_llm(user).strip()
+            data = _parse_json_response(out)
+            if data.get("action") == "prd":
+                break  # PO 가 충분하다고 판단하면 스스로 그만
+            question = str(data.get("question") or "").strip() or "조금 더 구체적으로 알려주세요."
             answer = ask(question) if ask else "(없음)"
             history += f"Q. {question}\nA. {answer}\n"
             ctx.setdefault("answers", []).append((question, answer))
         else:
-            # 최대 횟수 도달 → 강제로 PRD 작성
+            # 상한 도달 시에만 강제로 PRD 작성
             self.chat_msg(f"질문 횟수 상한({max_q}회)에 도달했습니다. 명세서를 작성합니다.")
-            forced = self.chat(
+            forced = self.ask_llm(
                 "질문을 멈추고 지금까지의 정보로 PRD 를 작성하라.\n"
-                f"형식:\n=== PRD ===\n<명세서>\n=== END PRD ===\n\n지금까지 답변:\n{history}"
+                f"output_schema 의 JSON 으로 action=prd 를 출력하라.\n\n지금까지 답변:\n{history}"
             )
             out = forced
 
-        m = PRD_RE.search(out)
-        prd = m.group(1).strip() if m else out.strip()
+        data = _parse_json_response(out)
+        prd = data.get("prd")
+        if not isinstance(prd, str):
+            prd = json.dumps(data or out, ensure_ascii=False, indent=2)
+        prd = prd.strip()
         tools.write_file("docs/PRD.md", prd)
         ctx["prd"] = prd
         n_answers = len(ctx.get("answers", []))
@@ -131,7 +235,7 @@ class Architect(Agent):
     """테크 리드 겸 아키텍트: 시스템 구조/클린 아키텍처/폴더 구조/기술스택 설계."""
 
     name = "Architect"
-    prompt_file = "Architect.txt"
+    prompt_file = "Architect.json"
 
     def run(self, ctx: dict) -> dict:
         self.log("기술 설계(아키텍처/폴더/기술스택) 시작")
@@ -141,8 +245,9 @@ class Architect(Agent):
             f"PRD(명세서):\n{ctx.get('prd', '')}\n\n"
             f"현재 파일:\n{_format_files(files)}"
         )
-        out = self.chat(user)
-        written = _write_blocks(out, ctx, "arch_files")
+        out = self.ask_llm(user)
+        blocks = _files_from(_parse_json_response(out))
+        written = _write_blocks(blocks, ctx, "arch_files")
         self.chat_msg(
             f"🏗 아키텍처 설계 완료 ({len(written)}개 파일)\n\n{out.strip()[:500]}"
         )
@@ -150,7 +255,10 @@ class Architect(Agent):
 
 
 class Dev(Agent):
-    """백엔드 개발자 공통 로직. DevA/B/C 가 상속받아 분업한다."""
+    """백엔드 개발자. PRD/아키텍처 문서에 따라 프로젝트 전체를 구현한다."""
+
+    name = "Dev"
+    prompt_file = "Dev.json"
 
     def run(self, ctx: dict) -> dict:
         self.log(f"{self.name} 코드 작성 시작")
@@ -162,39 +270,19 @@ class Dev(Agent):
             f"아키텍처 문서:\n{arch}\n\n"
             f"현재 파일:\n{_format_files(files)}"
         )
-        out = self.chat(user)
-        written = _write_blocks(out, ctx, f"{self.name.lower()}_files")
+        out = self.ask_llm(user)
+        blocks = _files_from(_parse_json_response(out))
+        written = _write_blocks(blocks, ctx, "dev_files")
         summary = "\n".join(f"- {rel}" for rel in written) or "- (없음)"
         self.chat_msg(f"✅ {self.name} 구현 완료 ({len(written)}개 파일)\n\n{summary}")
         return {"files": written, "raw": out}
-
-
-class DevA(Dev):
-    """도메인 계층 담당: 엔티티/도메인 모델/리포지토리."""
-
-    name = "DevA"
-    prompt_file = "DevA.txt"
-
-
-class DevB(Dev):
-    """프레젠테이션·인프라 담당: API/서비스/컨트롤러/외부 연동."""
-
-    name = "DevB"
-    prompt_file = "DevB.txt"
-
-
-class DevC(Dev):
-    """테스트·설정·예외처리 담당: 테스트 코드/환경설정/에지케이스."""
-
-    name = "DevC"
-    prompt_file = "DevC.txt"
 
 
 class QA(Agent):
     """QA: 품질 검수 + 테스트 실행 + 예외/에지케이스 검증."""
 
     name = "QA"
-    prompt_file = "QA.txt"
+    prompt_file = "QA.json"
 
     def _pick_test_command(self, ctx: dict) -> str:
         file_list = "\n".join(sorted(tools.read_workspace_files().keys())) or "(없음)"
@@ -222,7 +310,7 @@ class QA(Agent):
         ctx["test_command"] = cmd
         self.log(f"테스트 완료 (exit={test['exit_code']})")
 
-        # 2) 정적 검수 (요구사항/아키텍처/품질/예외상황)
+        # 2) 정적 검수 (요구사항/아키텍처/품질/예외상황) → JSON 판정
         files = tools.read_workspace_files()
         user = (
             f"CEO 지시:\n{ctx['request']}\n\n"
@@ -232,21 +320,24 @@ class QA(Agent):
             f"STDERR:\n{test.get('stderr', '')[-2000:]}\n\n"
             f"구현 파일:\n{_format_files(files)}"
         )
-        out = self.chat(user, system=self.system_prompt())
+        out = self.ask_llm(user, system=self.system_prompt())
+        data = _parse_json_response(out)
 
-        m_verdict = re.search(r"VERDICT:\s*(PASS|FAIL)", out, re.IGNORECASE)
-        verdict = m_verdict.group(1).upper() if m_verdict else (
+        raw_verdict = str(data.get("verdict") or "").upper()
+        verdict = raw_verdict if raw_verdict in ("PASS", "FAIL") else (
             "FAIL" if test.get("exit_code", 0) != 0 else "PASS"
         )
-        m_report = QA_REPO_RE.search(out)
-        report = m_report.group(1).strip() if m_report else out.strip()
+        report = str(data.get("report") or "").strip() or json.dumps(data, ensure_ascii=False)
+        issues = data.get("issues") or []
+        if isinstance(issues, str):
+            issues = [issues]
 
         qa_doc = (
-            f"VERDICT: {verdict}\n\n"
-            f"테스트 명령: {cmd} (exit={test.get('exit_code')})\n\n"
-            f"{report}\n\n"
-            f"-- 테스트 출력 --\n{test.get('stdout','')[-1000:]}"
+            f"VERDICT: {verdict}\n\n테스트 명령: {cmd} (exit={test.get('exit_code')})\n\n{report}"
         )
+        if issues:
+            qa_doc += "\n\n이슈:\n" + "\n".join(f"- {i}" for i in issues)
+        qa_doc += f"\n\n-- 테스트 출력 --\n{test.get('stdout','')[-1000:]}"
         tools.write_file("docs/QA_REPORT.md", qa_doc)
         ctx["qa_report"] = report
         ctx["verdict"] = verdict
@@ -262,7 +353,7 @@ class Fixer(Agent):
     """QA가 발견한 이슈를 수정한다 (수정 후 QA 재실행, 최대 MAX_FIX_ATTEMPTS)."""
 
     name = "Fixer"
-    prompt_file = "Fixer.txt"
+    prompt_file = "Fixer.json"
 
     def run(self, ctx: dict) -> dict:
         self.log("코드 수정 시작")
@@ -277,8 +368,9 @@ class Fixer(Agent):
             f"STDERR:\n{test.get('stderr', '')[-3000:]}\n\n"
             f"현재 파일:\n{_format_files(files)}"
         )
-        out = self.chat(user)
-        written = _write_blocks(out, ctx, "fixed_files")
+        out = self.ask_llm(user)
+        blocks = _files_from(_parse_json_response(out))
+        written = _write_blocks(blocks, ctx, "fixed_files")
         summary = "\n".join(f"- {rel}" for rel in written) or "- (없음)"
         self.chat_msg(f"🔧 문제 수정 완료 ({len(written)}개 파일)\n\n{summary}")
         return {"fixed_files": written}
@@ -288,7 +380,7 @@ class Finalizer(Agent):
     """CEO(사용자)를 위한 최종 보고서 작성."""
 
     name = "Finalizer"
-    prompt_file = "Finalizer.txt"
+    prompt_file = "Finalizer.json"
 
     def run(self, ctx: dict) -> dict:
         self.log("최종 보고서 작성 시작")
@@ -304,7 +396,9 @@ class Finalizer(Agent):
             f"STDERR:\n{test.get('stderr', '')[-1500:]}\n\n"
             f"최종 파일:\n{_format_files(files)}"
         )
-        out = self.chat(user)
-        ctx["summary"] = out
-        self.chat_msg(f"🏁 CEO 최종 보고\n\n{out.strip()}")
-        return {"summary": out}
+        out = self.ask_llm(user)
+        data = _parse_json_response(out)
+        summary = str(data.get("summary") or "").strip() or out.strip()
+        ctx["summary"] = summary
+        self.chat_msg(f"🏁 CEO 최종 보고\n\n{summary.strip()}")
+        return {"summary": summary}

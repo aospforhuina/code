@@ -9,7 +9,7 @@ import config
 # 읽기에서 제외할 디렉터리/파일
 SKIP_DIRS = {".venv", "node_modules", "__pycache__", ".git", ".env", ".pytest_cache"}
 
-# DevA/DevB/DevC/Fixer 가 출력하는 파일 블록 형식
+# (레거시) 파일 블록 파싱 — 현재 에이전트는 JSON files 배열을 사용
 FILE_RE = re.compile(r"=== FILE: (.+?) ===\r?\n(.*?)\r?\n=== END FILE ===", re.DOTALL)
 
 

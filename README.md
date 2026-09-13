@@ -11,9 +11,9 @@ OpenRouter(OpenAI 호환 API) 기반으로 **가상의 엔터프라이즈 AI 개
 
 ```
 CEO(사용자 = 당신)
-→ PO/PM          : CEO와 진득한 질의응답(최소 5회~최대 20회) → 니즈 도출 → 명세서(PRD)
+→ PO/PM          : CEO와 질의응답(꼭 필요할 때만, 충분하면 스스로 명세서) → PRD
 → Architect       : 시스템 구조 / 클린 아키텍처 / 폴더 구조 / 기술 스택 설계
-→ DevA/DevB/DevC  : 백엔드 개발자 3명 분업 구현 (도메인 · API·인프라 · 테스트·예외)
+→ Dev             : 백엔드 구현
 → QA              : 품질 검수 + 테스트 실행 + 예외/에지케이스 검증
 → (실패 시 Fixer → QA 재실행, 최대 5회)
 → Finalizer       : CEO 최종 보고
@@ -56,10 +56,14 @@ bash agent.sh
 방 안에 **CEO처럼 지시** 를 입력하면 파이프라인이 시작됩니다.
 
 - 먼저 **PO가 질문을 하나씩** 던지고 입력창이 활성화됩니다. 답변을 입력하고
-  Enter 를 누르면 다음 질문으로 이어집니다. **최소 5회, 최대 20회** 질문 후
+  Enter 를 누르면 다음 질문으로 이어집니다. **꼭 필요할 때만** 물어보고,
+포가 "충분하다"고 판단하면 스스로 그만두고 명세서를 작성합니다.
   명세서가 작성됩니다.
-- 이후 설계 → 개발자 3명 구현 → QA 검수 → 최종 보고가 말풍선과 단계 상태로
+- 이후 설계 → 개발자(Dev) 구현 → QA 검수 → 최종 보고가 말풍선과 단계 상태로
   표시됩니다.
+- 작업 중에는 화면 하단의 **막대바**가 움직이고, 응답은 **스트리밍**으로
+  실시간 표시됩니다. 사고(reasoning) 모델을 쓰면 🧠 영역에서 생각하는 과정도
+  보입니다.
 - 작업 공간에는 문서 산출물이 남습니다:
   `docs/PRD.md`(명세서), `docs/ARCHITECTURE.md`(설계), `docs/QA_REPORT.md`(검수 보고)
 
@@ -68,9 +72,9 @@ bash agent.sh
 | 변수 | 기본값 | 설명 |
 |---|---|---|
 | `OPENROUTER_API_KEY` | (없음) | OpenRouter 키. `sk-or-…` |
-| `MODEL` | `openai/gpt-4o-mini` | 사용할 모델 (예: `anthropic/claude-3.5-sonnet`) |
-| `PO_MIN_QUESTIONS` | `5` | PO가 CEO에게 묻는 **최소** 질문 수 |
-| `PO_MAX_QUESTIONS` | `20` | PO가 CEO에게 묻는 **최대** 질문 수 |
+| `MODEL` | `openai/gpt-4o-mini` | 사용할 모델 (예: `anthropic/claude-3.5-sonnet`, 사고 모델 `deepseek/deepseek-reasoner`) |
+| `STREAMING` | `1` | 응답을 스트리밍으로 표시 (0 이면 일반 호출) |
+| `PO_MAX_QUESTIONS` | `20` | PO 가 CEO에게 묻는 **상한** (충분하면 스스로 명세서 작성) |
 | `MAX_FIX_ATTEMPTS` | `5` | QA 실패 시 Fixer 최대 반복 횟수 |
 | `TEST_TIMEOUT` | `300` | 테스트 명령 타임아웃(초) |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | API 엔드포인트 |
@@ -85,11 +89,11 @@ code/
 └── libs/
     ├── main.py        Textual TUI (방 목록 / 채팅 화면, 작업 전환)
     ├── pipeline.py    고정 파이프라인 오케스트레이션 + 인터랙티브 Q&A(ask/respond)
-    ├── agents.py      작업 AI 8종 (PO, Architect, DevA/B/C, QA, Fixer, Finalizer)
+    ├── agents.py      작업 AI 6종 (PO, Architect, Dev, QA, Fixer, Finalizer)
     ├── chats.py       채팅방 저장소 (info.json + messages.jsonl)
-    ├── tools.py       workspace 파일 읽기/쓰기, 셸 테스트 실행, 파일 블록 파싱
+    ├── tools.py       workspace 파일 읽기/쓰기, 셸 테스트 실행, JSON 파일 파싱
     ├── config.py      .env 로드, 모델/경로/횟수 설정
-    ├── prompt/        작업 AI별 프롬프트 — <작업AI이름>.txt
+    ├── prompt/        작업 AI별 프롬프트 — <작업AI이름>.json (JSON 스키마)
     ├── chats/         작업별 대화 기록 (git 제외)
     ├── requirements.txt
     └── .env / .env.example
@@ -97,27 +101,33 @@ code/
 
 ## 프롬프트 수정 (작업 AI 조정)
 
-각 작업 AI 의 프롬프트는 `libs/prompt/<작업AI이름>.txt` 에 분리되어 있습니다.
-파일을 수정하면 **다음 실행부터 즉시 반영**됩니다 (재시작 불필요).
+각 작업 AI 의 프롬프트는 `libs/prompt/<작업AI이름>.json` 에 분리되어 있습니다.
+**JSON 스키마 기반**이라 `role`(역할), `mission`(임무), `rules`(규칙),
+`output_schema`(출력 JSON 스키마) 로 나뉘며, 에이전트가 이 스키마에 맞는
+**JSON 만** 내도록 강제합니다. 예외가 날 수 있는 자유 텍스트 파싱 대신
+구조화된 파싱이 적용됩니다.
 
-| 파일 | 작업 AI |
-|---|---|
-| `PO.txt` | CEO 질의응답 → 명세서(PRD) |
-| `Architect.txt` | 구조/클린 아키텍처/폴더/기술스택 설계 |
-| `DevA.txt` | 백엔드 DevA — 도메인 계층 |
-| `DevB.txt` | 백엔드 DevB — API·인프라 계층 |
-| `DevC.txt` | 백엔드 DevC — 테스트·설정·예외처리 |
-| `QA.txt` | QA 검수 (VERDICT 규칙 포함) |
-| `Fixer.txt` | 문제 수정 |
-| `Finalizer.txt` | CEO 최종 보고 |
+```json
+{
+  "role": "...",
+  "mission": "...",
+  "rules": ["..."],
+  "output_schema": { "type": "object", "properties": { ... }, "required": [...] }
+}
+```
+
+파일을 수정하면 **다음 실행부터 즉시 반영**됩니다 (재시작 불필요).
 
 ## 동작 방식
 
 - PO 는 `Pipeline.ask()` 로 질문을 채팅에 내보내고 CEO(사용자)의 답변
-  (`Pipeline.respond()`) 을 기다렸다가, 최소 질문 횟수를 채운 뒤에만 PRD 를
-  작성합니다.
-- DevA/B/C 와 Fixer 는 `=== FILE: 경로 === ... === END FILE ===` 블록으로 전체
-  파일 내용을 반환하면 tools 가 해당 파일을 **채팅방 전용 workspace**에
+  (`Pipeline.respond()`) 을 기다립니다. 강제 횟수는 없으며, **충분하다고
+  판단하면 스스로 PRD 를 작성**해 넘어갑니다 (상한은 PO_MAX_QUESTIONS).
+- **스트리밍**: 모든 에이전트 응답은 `chat_stream()` 로 실시간 수신되며
+  `stream`(작성 중인 글자) / `think`(사고 과정) / `work_start·work_end`(막대바)
+  이벤트로 TUI 에 전달됩니다.
+- Dev 와 Fixer 는 `{"files": [{"path": "...", "content": "..."}]}` JSON 으로
+  전체 파일 내용을 반환하면 tools 가 해당 파일을 **채팅방 전용 workspace**에
   생성/덮어씁니다. (방마다 폴더가 분리되어 **작업 간 파일이 섞이지 않음**)
 - QA 는 LLM 으로 테스트 명령을 결정해 셸에서 실행하고 stdout/stderr/exit code 를
   수집하며, `VERDICT: FAIL` 또는 테스트 실패 시 Fixer 가 수정하고 QA 를 다시

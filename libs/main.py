@@ -16,7 +16,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static
+from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, ProgressBar, Static
 
 # 파이프라인 단계 표시 상태
 PENDING, RUNNING, DONE, FAILED = "pending", "running", "done", "failed"
@@ -168,16 +168,21 @@ class ChatRoomView(Screen):
         super().__init__()
         self._app = app
         self.chat_id = chat_id
+        self._busy = 0  # 진행 중 에이전트 수
 
     def compose(self) -> ComposeResult:
         yield Header()
         self.steps_view = StepsView(STEPS, id="steps")
         self.activity = Static(ROOM_HINT, id="activity")
+        self.live = Static("", id="live")
+        self.busy = ProgressBar(total=None, show_percentage=False, id="busy")
         self.chat_box = VerticalScroll(id="chat")
         self.prompt = Input(placeholder="메시지를 입력하세요 (Enter 로 실행)...", id="prompt")
         yield Vertical(
             self.steps_view,
             self.activity,
+            self.live,
+            self.busy,
             self.chat_box,
             self.prompt,
             id="body",
@@ -242,6 +247,26 @@ class ChatRoomView(Screen):
 
     def show_activity(self, msg: str):
         self.activity.update(msg)
+
+    # --- 스트리밍 / 작업 진행 표시 ---
+    def show_work_start(self, name: str):
+        self._busy += 1
+        self.busy.update(total=None)  # 불확정(인디터미닛) 막대바
+        self.live.update(f"⏳ [{name}] 작업 중...")
+
+    def show_work_end(self, name: str):
+        self._busy = max(0, self._busy - 1)
+        if self._busy == 0:
+            self.busy.update(total=1, progress=0)  # 대기 표시
+            self.live.update(ROOM_HINT)
+
+    def show_think(self, name: str, chunk: str):
+        self.live.update(f"🧠 [{name}] thinking... {chunk[-160:]}")
+        self.busy.update(total=None)
+
+    def show_stream(self, name: str, chunk: str):
+        self.live.update(f"✍️ [{name}] {chunk[-160:]}")
+        self.busy.update(total=None)
 
     def show_question(self):
         """PO(또는 에이전트)의 질문이 왔을 때 입력을 활성화."""
@@ -321,6 +346,13 @@ class PipelineApp(App):
         content-align: left middle;
         padding: 0 1;
     }
+    #live {
+        height: 3;
+        border: round $accent;
+        content-align: left middle;
+        padding: 0 1;
+    }
+    #busy { height: 1; }
     #chat {
         height: 1fr;
         border: round $secondary;
@@ -391,6 +423,14 @@ class PipelineApp(App):
             room.show_steps(ev[1], DONE)
         elif kind == "step_fail":
             room.show_steps(ev[1], FAILED)
+        elif kind == "work_start":
+            room.show_work_start(ev[1])
+        elif kind == "work_end":
+            room.show_work_end(ev[1])
+        elif kind == "think":
+            room.show_think(ev[1], ev[2])
+        elif kind == "stream":
+            room.show_stream(ev[1], ev[2])
         elif kind == "question":
             room.show_question()
         elif kind == "error":

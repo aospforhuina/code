@@ -1,9 +1,9 @@
 """고정 파이프라인 오케스트레이션 (엔터프라이즈).
 
 CEO(사용자)
-→ PO      : 인터랙티브 질의응답(최대 PO_MAX_QUESTIONS)으로 니즈 도출 → PRD 명세서
+→ PO      : 인터랙티브 질의응답(상한 PO_MAX_QUESTIONS, 되면 알아서 멈춤) → PRD 명세서
 → Architect : 시스템 구조/클린 아키텍처/폴더 구조/기술스택 설계
-→ DevA/DevB/DevC : 백엔드 분업 구현
+→ Dev     : 백엔드 구현
 → QA      : 품질 검수 + 테스트 실행 + 예외상황 검증
 → (실패 시 Fixer → QA 반복, 최대 MAX_FIX_ATTEMPTS)
 → Finalizer : CEO 최종 보고
@@ -20,7 +20,7 @@ import config
 
 # TUI 에 표시할 고정 단계 순서
 STEPS = [
-    "PO", "Architect", "DevA", "DevB", "DevC",
+    "PO", "Architect", "Dev",
     "QA", "Fixer", "Finalizer",
 ]
 
@@ -105,9 +105,7 @@ class Pipeline:
     def _run(self):
         po = agents.PO(self.emit)
         architect = agents.Architect(self.emit)
-        deva = agents.DevA(self.emit)
-        devb = agents.DevB(self.emit)
-        devc = agents.DevC(self.emit)
+        dev = agents.Dev(self.emit)
         qa = agents.QA(self.emit)
         fixer = agents.Fixer(self.emit)
         finalizer = agents.Finalizer(self.emit)
@@ -119,12 +117,8 @@ class Pipeline:
         self.emit("activity", "아키텍트가 시스템 설계 중...")
         self._step("Architect", lambda: architect.run(self.context))
 
-        self.emit("activity", "백엔드 개발자 DevA 작업 중...")
-        self._step("DevA", lambda: deva.run(self.context))
-        self.emit("activity", "백엔드 개발자 DevB 작업 중...")
-        self._step("DevB", lambda: devb.run(self.context))
-        self.emit("activity", "백엔드 개발자 DevC 작업 중...")
-        self._step("DevC", lambda: devc.run(self.context))
+        self.emit("activity", "백엔드 개발자가 코드 작성 중...")
+        self._step("Dev", lambda: dev.run(self.context))
 
         # QA → (실패 시 Fixer) 반복
         fix_count = 0
