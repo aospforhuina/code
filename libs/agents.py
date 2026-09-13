@@ -78,7 +78,7 @@ def _write_blocks(out: str, ctx: dict, key: str) -> list[str]:
 
 
 class PO(Agent):
-    """PO/PM: CEO(사용자)와 질의응답 → 니즈 도출 → PRD 명세서 작성."""
+    """PO/PM: CEO(사용자)와 진득한 질의응답(min~max) → 니즈 도출 → PRD 명세서."""
 
     name = "PO"
     prompt_file = "PO.txt"
@@ -86,9 +86,11 @@ class PO(Agent):
     def run(self, ctx: dict) -> dict:
         self.log("CEO 니즈 파악을 위한 질의응답 시작")
         ask = ctx.get("_ask")
+        min_q = config.PO_MIN_QUESTIONS
+        max_q = config.PO_MAX_QUESTIONS
         history = ""
         out = ""
-        for i in range(1, config.PO_MAX_QUESTIONS + 1):
+        for i in range(1, max_q + 1):
             user = (
                 f"CEO 지시:\n{ctx['request']}\n\n"
                 f"최근 대화:\n{ctx.get('chat_history', '')}\n\n"
@@ -96,17 +98,22 @@ class PO(Agent):
             )
             out = self.chat(user).strip()
             m = PRD_RE.search(out)
+            n_asked = len(ctx.get("answers", []))
+            if m and n_asked >= min_q:
+                break  # 최소 질문 횟수를 채운 뒤에만 PRD 수용
             if m:
-                break
-            question = out.splitlines()[0].strip() or "조금 더 구체적으로 알려주세요."
-            answer = ask(question) if ask else "(답변 없음)"
+                # 너무 일찍 PRD 를 내면 추가 질문을 유도
+                question = f"아직 질문이 최소 {min_q}회에 못 미칩니다. 이제 진짜 필요한 추가 질문을 하나만 해주세요."
+            else:
+                question = out.splitlines()[0].strip() or "조금 더 구체적으로 알려주세요."
+            answer = ask(question) if ask else "(없음)"
             history += f"Q. {question}\nA. {answer}\n"
             ctx.setdefault("answers", []).append((question, answer))
         else:
-            # 질문 횟수 소진 → 강제로 PRD 작성
-            self.chat_msg("질문 횟수 제한에 도달했습니다. 명세서를 작성합니다.")
+            # 최대 횟수 도달 → 강제로 PRD 작성
+            self.chat_msg(f"질문 횟수 상한({max_q}회)에 도달했습니다. 명세서를 작성합니다.")
             forced = self.chat(
-                "질문을 멈추고 지금까지의 정보로 PRD를 작성하라.\n"
+                "질문을 멈추고 지금까지의 정보로 PRD 를 작성하라.\n"
                 f"형식:\n=== PRD ===\n<명세서>\n=== END PRD ===\n\n지금까지 답변:\n{history}"
             )
             out = forced
@@ -115,7 +122,8 @@ class PO(Agent):
         prd = m.group(1).strip() if m else out.strip()
         tools.write_file("docs/PRD.md", prd)
         ctx["prd"] = prd
-        self.chat_msg(f"📋 명세서(PRD) 작성 완료\n\n{prd[:800]}")
+        n_answers = len(ctx.get("answers", []))
+        self.chat_msg(f"📋 명세서(PRD) 작성 완료 ({n_answers}회 질문)\n\n{prd[:800]}")
         return {"prd": prd, "answers": ctx.get("answers", [])}
 
 

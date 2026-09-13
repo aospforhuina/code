@@ -17,8 +17,10 @@ MODEL = os.getenv("MODEL", "openai/gpt-4o-mini")
 # --- 파이프라인 동작 ---
 MAX_FIX_ATTEMPTS = int(os.getenv("MAX_FIX_ATTEMPTS", "5"))
 TEST_TIMEOUT = int(os.getenv("TEST_TIMEOUT", "300"))
-# PO가 CEO와 주고받는 질문 최대 횟수
-PO_MAX_QUESTIONS = int(os.getenv("PO_MAX_QUESTIONS", "3"))
+# PO가 CEO와 주고받는 질문 — 최소·최대 횟수 (진득한 니즈 파악)
+PO_MIN_QUESTIONS = int(os.getenv("PO_MIN_QUESTIONS", "5"))
+PO_MAX_QUESTIONS = int(os.getenv("PO_MAX_QUESTIONS", "20"))
+PO_MAX_QUESTIONS = max(PO_MIN_QUESTIONS, PO_MAX_QUESTIONS)  # 최소 ≤ 최대 보장
 
 # --- 경로 ---
 # 프로젝트 루트 = agent.sh 가 있는 디렉터리 (libs 의 상위)
