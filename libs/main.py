@@ -109,6 +109,42 @@ class ConfirmDialog(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class ThinkingPopup(ModalScreen[None]):
+    """사고 과정(reasoning)을 크게 보여주는 팝업 (Ctrl+T)."""
+
+    BINDINGS = [("escape", "close", "닫기"), ("q", "close", "닫기")]
+
+    def __init__(self, agent: str = "", text: str = ""):
+        super().__init__()
+        self._agent = agent
+        self._text = text
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static("🧠 Thinking", id="think-title"),
+            Static("", id="think-agent"),
+            VerticalScroll(Static("", id="think-body-text"), id="think-body"),
+            Static("Esc: 닫기", id="think-hint"),
+            id="think-popup",
+        )
+
+    def on_mount(self):
+        self.update_text(self._agent, self._text)
+
+    def update_text(self, agent: str, text: str):
+        """열려 있는 동안 새 청크가 오면 실시간 갱신."""
+        self._agent = agent
+        self._text = text
+        # "[아이디]" 가 마크업으로 오인되지 않도록 Text 로 전달
+        self.query_one("#think-agent", Static).update(Text(f"[{agent}]" if agent else ""))
+        body = self.query_one("#think-body-text", Static)
+        body.update(Text(text or "(아직 표시할 thinking 이 없습니다.)"))
+        self.query_one("#think-body", VerticalScroll).scroll_end(animate=False)
+
+    def action_close(self):
+        self.dismiss(None)
+
+
 class ChatListView(Screen):
     """채팅방(작업) 목록 + 새 채팅 생성."""
 
@@ -161,6 +197,7 @@ class ChatRoomView(Screen):
         ("ctrl+n", "new_chat", "새 방"),
         ("ctrl+e", "rename", "이름 수정"),
         ("ctrl+backspace", "delete_chat", "방 삭제"),
+        ("ctrl+t", "show_think", "thinking"),
         ("q", "quit", "종료"),
     ]
 
@@ -169,6 +206,8 @@ class ChatRoomView(Screen):
         self._app = app
         self.chat_id = chat_id
         self._busy = 0  # 진행 중 에이전트 수
+        self._thinking: dict[str, str] = {}  # 에이전트별 사고 과정 누적 (Ctrl+T 팝업용)
+        self._think_popup: ThinkingPopup | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -219,6 +258,7 @@ class ChatRoomView(Screen):
     def _start_pipeline(self, text: str):
         self.prompt.value = ""
         self.prompt.disabled = True
+        self._thinking = {}
         # 이전 대화를 짧게 요약해 다음 작업의 맥락으로 넘긴다
         msgs = chats.load_messages(self.chat_id)
         history = "\n".join(f"[{m['author']}] {m['content'][:200]}" for m in msgs[-6:])
@@ -251,6 +291,7 @@ class ChatRoomView(Screen):
     # --- 스트리밍 / 작업 진행 표시 ---
     def show_work_start(self, name: str):
         self._busy += 1
+        self._thinking[name] = ""  # 에이전트 새 작업 시작 → 사고 버퍼 초기화
         self.busy.update(total=None)  # 불확정(인디터미닛) 막대바
         self.live.update(f"⏳ [{name}] 작업 중...")
 
@@ -261,12 +302,31 @@ class ChatRoomView(Screen):
             self.live.update(ROOM_HINT)
 
     def show_think(self, name: str, chunk: str):
-        self.live.update(f"🧠 [{name}] thinking... {chunk[-160:]}")
+        self._thinking[name] = self._thinking.get(name, "") + chunk  # 누적
+        self.live.update(f"🧠 [{name}] thinking... {self._thinking[name][-160:]}")
         self.busy.update(total=None)
+        if self._think_popup is not None:
+            try:
+                self._think_popup.update_text(name, self._thinking[name])
+            except Exception:  # noqa: BLE001 - 팝업이 이미 닫힌 경우
+                self._think_popup = None
 
     def show_stream(self, name: str, chunk: str):
         self.live.update(f"✍️ [{name}] {chunk[-160:]}")
         self.busy.update(total=None)
+
+    # --- Ctrl+T: thinking 크게 보기 ---
+    def action_show_think(self):
+        name, text = "", ""
+        for n, t in self._thinking.items():
+            if t.strip():
+                name, text = n, t
+        popup = ThinkingPopup(name, text)
+        self._think_popup = popup
+        self.app.push_screen(popup, self._think_popup_closed)
+
+    def _think_popup_closed(self, result):
+        self._think_popup = None
 
     def show_question(self):
         """PO(또는 에이전트)의 질문이 왔을 때 입력을 활성화."""
@@ -381,6 +441,19 @@ class PipelineApp(App):
     }
     #confirm-message { text-style: bold; }
     #confirm-hint { color: $text-muted; text-align: center; }
+    ThinkingPopup {
+        align: center middle;
+    }
+    #think-popup {
+        width: 80%;
+        height: 80%;
+        border: round $accent;
+        padding: 1;
+    }
+    #think-title { text-style: bold; text-align: center; }
+    #think-agent { color: $text-muted; }
+    #think-body { height: 1fr; border: round $secondary; padding: 0 1; }
+    #think-hint { color: $text-muted; text-align: center; }
     """
 
     BINDINGS = [("ctrl+q", "quit", "종료")]

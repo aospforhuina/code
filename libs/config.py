@@ -29,7 +29,7 @@ ROOT_DIR = BASE_DIR.parent
 
 # 작업 결과물: 루트 workspace/ 아래에 채팅방별로 저장 (workspace/<방ID>/)
 WORKSPACE_DIR = ROOT_DIR / "workspace"
-# 작업 AI별 프롬프트: prompt/<작업AI이름>.json (role/mission/rules/output_schema)
+# 작업 AI별 프롬프트: prompt/<작업AI이름>.txt (자연어 — 파일을 그대로 시스템 프롬프트로 사용)
 PROMPTS_DIR = BASE_DIR / "prompt"
 
 WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)

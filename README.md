@@ -47,6 +47,7 @@ bash agent.sh
 | `n` | 새 채팅방(새 작업) 만들기 |
 | `Ctrl+E` | 채팅방 이름 수정 (방 화면에서만) |
 | `Ctrl+Backspace` | 채팅방 삭제 (방 화면에서만, 확인 다이얼로그) |
+| `Ctrl+T` | 사고 중인 내용(thinking)을 크게 팝업으로 보기 |
 | `Ctrl+R` | 채팅방 목록으로 전환 |
 | `Ctrl+N` | 다른 방을 새로 열기 |
 | `Ctrl+Q` / `q` | 종료 |
@@ -91,9 +92,9 @@ code/
     ├── pipeline.py    고정 파이프라인 오케스트레이션 + 인터랙티브 Q&A(ask/respond)
     ├── agents.py      작업 AI 6종 (PO, Architect, Dev, QA, Fixer, Finalizer)
     ├── chats.py       채팅방 저장소 (info.json + messages.jsonl)
-    ├── tools.py       workspace 파일 읽기/쓰기, 셸 테스트 실행, JSON 파일 파싱
+    ├── tools.py       workspace 파일 읽기/쓰기, 셸 테스트 실행, 파일 블록 파싱
     ├── config.py      .env 로드, 모델/경로/횟수 설정
-    ├── prompt/        작업 AI별 프롬프트 — <작업AI이름>.json (JSON 스키마)
+    ├── prompt/        작업 AI별 프롬프트 — <작업AI이름>.txt (자연어)
     ├── chats/         작업별 대화 기록 (git 제외)
     ├── requirements.txt
     └── .env / .env.example
@@ -101,20 +102,18 @@ code/
 
 ## 프롬프트 수정 (작업 AI 조정)
 
-각 작업 AI 의 프롬프트는 `libs/prompt/<작업AI이름>.json` 에 분리되어 있습니다.
-**JSON 스키마 기반**이라 `role`(역할), `mission`(임무), `rules`(규칙),
-`output_schema`(출력 JSON 스키마) 로 나뉘며, 에이전트가 이 스키마에 맞는
-**JSON 만** 내도록 강제합니다. 예외가 날 수 있는 자유 텍스트 파싱 대신
-구조화된 파싱이 적용됩니다.
+각 작업 AI 의 프롬프트는 `libs/prompt/<작업AI이름>.txt` 에 분리되어 있습니다.
+**자연어 프롬프트 방식**이며, 파일 내용이 그대로 시스템 프롬프트로 사용됩니다.
+응답은 정해진 마커 규약을 따릅니다:
 
-```json
-{
-  "role": "...",
-  "mission": "...",
-  "rules": ["..."],
-  "output_schema": { "type": "object", "properties": { ... }, "required": [...] }
-}
-```
+| 작업 AI | 프롬프트 파일 | 응답 마커 |
+|---|---|---|
+| PO | `PO.txt` | 질문(한 줄) 또는 `=== PRD === ... === END PRD ===` |
+| Architect | `Architect.txt` | `=== FILE: 경로 === ... === END FILE ===` (설계 파일·폴더 스켈레톤) |
+| Dev | `Dev.txt` | `=== FILE: 경로 === ... === END FILE ===` |
+| QA | `QA.txt` | `=== QA_REPORT === ... === END QA_REPORT ===` + `VERDICT: PASS/FAIL` |
+| Fixer | `Fixer.txt` | `=== FILE: 경로 === ... === END FILE ===` |
+| Finalizer | `Finalizer.txt` | 자연어 요약 |
 
 파일을 수정하면 **다음 실행부터 즉시 반영**됩니다 (재시작 불필요).
 
@@ -126,8 +125,8 @@ code/
 - **스트리밍**: 모든 에이전트 응답은 `chat_stream()` 로 실시간 수신되며
   `stream`(작성 중인 글자) / `think`(사고 과정) / `work_start·work_end`(막대바)
   이벤트로 TUI 에 전달됩니다.
-- Dev 와 Fixer 는 `{"files": [{"path": "...", "content": "..."}]}` JSON 으로
-  전체 파일 내용을 반환하면 tools 가 해당 파일을 **채팅방 전용 workspace**에
+- Dev 와 Fixer 는 `=== FILE: 경로 === ... === END FILE ===` 블록으로 전체
+  파일 내용을 반환하면 tools 가 해당 파일을 **채팅방 전용 workspace**에
   생성/덮어씁니다. (방마다 폴더가 분리되어 **작업 간 파일이 섞이지 않음**)
 - QA 는 LLM 으로 테스트 명령을 결정해 셸에서 실행하고 stdout/stderr/exit code 를
   수집하며, `VERDICT: FAIL` 또는 테스트 실패 시 Fixer 가 수정하고 QA 를 다시
