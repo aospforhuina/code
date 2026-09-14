@@ -55,17 +55,25 @@ class Agent:
         except OSError:
             return ""
 
-    def chat(self, user_text: str, system: str | None = None) -> str:
+    def _create(self, messages: list[dict], stream: bool = False):
+        """공통 API 호출 (모델 하나, reasoning 여부는 모델이 자동 결정)."""
+        kw = {"model": config.MODEL, "messages": messages}
+        if stream:
+            kw.update(stream=True, stream_options={"include_usage": True})
+        return self.client.chat.completions.create(**kw)
+
+    def _build_messages(self, user_text: str, system: str | None) -> list[dict]:
         if system is None:
             system = self.system_prompt()
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": user_text})
-        resp = self.client.chat.completions.create(
-            model=config.MODEL,
-            messages=messages,
-        )
+        return messages
+
+    def chat(self, user_text: str, system: str | None = None) -> str:
+        messages = self._build_messages(user_text, system)
+        resp = self._create(messages)
         return resp.choices[0].message.content or ""
 
     def ask_llm(self, user_text: str, system: str | None = None) -> str:
@@ -81,19 +89,16 @@ class Agent:
         사고 모델의 reasoning 은 emit("think", 이름, 조각) 으로 전달된다.
         작업 시작/종료는 emit("work_start"/"work_end", 이름). 실패 시 비스트리밍 폴백.
         """
-        if system is None:
-            system = self.system_prompt()
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": user_text})
+        messages = self._build_messages(user_text, system)
         self.emit("work_start", self.name)
+        out_text = ""
+        usage = None
         try:
-            stream = self.client.chat.completions.create(
-                model=config.MODEL, messages=messages, stream=True,
-            )
+            stream = self._create(messages, stream=True)
             parts = []
             for chunk in stream:
+                if getattr(chunk, "usage", None):
+                    usage = chunk.usage  # 마지막 청크에 포함되는 사용량
                 if not getattr(chunk, "choices", None):
                     continue
                 delta = chunk.choices[0].delta
@@ -104,12 +109,20 @@ class Agent:
                 if content:
                     parts.append(content)
                     self.emit("stream", self.name, content)
-            return "".join(parts)
+            out_text = "".join(parts)
         except Exception as e:  # noqa: BLE001 - 스트리밍 미지원 등 → 일반 호출
             self.log(f"스트리밍 불가, 일반 호출로 폴백: {type(e).__name__}")
-            return self.chat(user_text, system=system)
+            out_text = self.chat(user_text, system=system)
         finally:
+            p = int(getattr(usage, "prompt_tokens", 0) or 0) if usage is not None else 0
+            c = int(getattr(usage, "completion_tokens", 0) or 0) if usage is not None else 0
+            if p <= 0:  # 사용량 미지원 시 추정
+                p = sum(len(m.get("content", "")) for m in messages) // 4
+            if c <= 0:
+                c = len(out_text) // 4
+            self.emit("usage", self.name, p, c)
             self.emit("work_end", self.name)
+        return out_text
 
 
 def _format_files(files: dict) -> str:

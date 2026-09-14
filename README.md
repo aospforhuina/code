@@ -64,7 +64,7 @@ bash agent.sh
   표시됩니다.
 - 작업 중에는 화면 하단의 **막대바**가 움직이고, 응답은 **스트리밍**으로
   실시간 표시됩니다. 사고(reasoning) 모델을 쓰면 🧠 영역에서 생각하는 과정도
-  보입니다.
+  보이며, 우상단에 **누적 토큰 사용량**(prompt → completion) 이 표시됩니다.
 - 작업 공간에는 문서 산출물이 남습니다:
   `docs/PRD.md`(명세서), `docs/ARCHITECTURE.md`(설계), `docs/QA_REPORT.md`(검수 보고)
 
@@ -75,6 +75,7 @@ bash agent.sh
 | `OPENROUTER_API_KEY` | (없음) | OpenRouter 키. `sk-or-…` |
 | `MODEL` | `openai/gpt-4o-mini` | 사용할 모델 (예: `anthropic/claude-3.5-sonnet`, 사고 모델 `deepseek/deepseek-reasoner`) |
 | `STREAMING` | `1` | 응답을 스트리밍으로 표시 (0 이면 일반 호출) |
+| `SHOW_THINKING` | `1` | 사고 과정(thinking)을 화면에 표시·누적 (0 이면 화면만 숨김) |
 | `PO_MAX_QUESTIONS` | `20` | PO 가 CEO에게 묻는 **상한** (충분하면 스스로 명세서 작성) |
 | `MAX_FIX_ATTEMPTS` | `5` | QA 실패 시 Fixer 최대 반복 횟수 |
 | `TEST_TIMEOUT` | `300` | 테스트 명령 타임아웃(초) |

@@ -23,6 +23,9 @@ PO_MAX_QUESTIONS = int(os.getenv("PO_MAX_QUESTIONS", "20"))
 # 응답 스트리밍 (0 으로 끄면 일반 호출)
 STREAMING = os.getenv("STREAMING", "1").strip().lower() in ("1", "true", "yes", "")
 
+# 사고 과정(thinking) 표시 (0 이면 표시·누적하지 않음)
+SHOW_THINKING = os.getenv("SHOW_THINKING", "1").strip().lower() in ("1", "true", "yes", "")
+
 # --- 경로 ---
 # 프로젝트 루트 = agent.sh 가 있는 디렉터리 (libs 의 상위)
 ROOT_DIR = BASE_DIR.parent

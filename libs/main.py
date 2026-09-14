@@ -208,10 +208,12 @@ class ChatRoomView(Screen):
         self._busy = 0  # 진행 중 에이전트 수
         self._thinking: dict[str, str] = {}  # 에이전트별 사고 과정 누적 (Ctrl+T 팝업용)
         self._think_popup: ThinkingPopup | None = None
+        self._usage = {"p": 0, "c": 0}  # 이번 실행 토큰 사용량 (우상단 표시)
 
     def compose(self) -> ComposeResult:
         yield Header()
         self.steps_view = StepsView(STEPS, id="steps")
+        self.usage = Static("", id="usage")
         self.activity = Static(ROOM_HINT, id="activity")
         self.live = Static("", id="live")
         self.busy = ProgressBar(total=None, show_percentage=False, id="busy")
@@ -219,6 +221,7 @@ class ChatRoomView(Screen):
         self.prompt = Input(placeholder="메시지를 입력하세요 (Enter 로 실행)...", id="prompt")
         yield Vertical(
             self.steps_view,
+            self.usage,
             self.activity,
             self.live,
             self.busy,
@@ -259,6 +262,8 @@ class ChatRoomView(Screen):
         self.prompt.value = ""
         self.prompt.disabled = True
         self._thinking = {}
+        self._usage = {"p": 0, "c": 0}
+        self.usage.update("")
         # 이전 대화를 짧게 요약해 다음 작업의 맥락으로 넘긴다
         msgs = chats.load_messages(self.chat_id)
         history = "\n".join(f"[{m['author']}] {m['content'][:200]}" for m in msgs[-6:])
@@ -302,6 +307,8 @@ class ChatRoomView(Screen):
             self.live.update(ROOM_HINT)
 
     def show_think(self, name: str, chunk: str):
+        if not self._app.show_thinking:
+            return  # thinking 표시 끔 옵션
         self._thinking[name] = self._thinking.get(name, "") + chunk  # 누적
         self.live.update(f"🧠 [{name}] thinking... {self._thinking[name][-160:]}")
         self.busy.update(total=None)
@@ -315,8 +322,21 @@ class ChatRoomView(Screen):
         self.live.update(f"✍️ [{name}] {chunk[-160:]}")
         self.busy.update(total=None)
 
+    def show_usage(self, name: str, p_tokens: int, c_tokens: int):
+        self._usage["p"] += int(p_tokens)
+        self._usage["c"] += int(c_tokens)
+        self._refresh_usage()
+
+    def _refresh_usage(self):
+        t = self._usage
+        if t["p"] or t["c"]:
+            self.usage.update(f"⚡ prompt {t['p']:,} → completion {t['c']:,} tokens (누적)")
+
     # --- Ctrl+T: thinking 크게 보기 ---
     def action_show_think(self):
+        if not self._app.show_thinking:
+            self.activity.update("🙈 thinking 표시가 꺼져 있습니다.  " + ROOM_HINT)
+            return
         name, text = "", ""
         for n, t in self._thinking.items():
             if t.strip():
@@ -412,6 +432,7 @@ class PipelineApp(App):
         content-align: left middle;
         padding: 0 1;
     }
+    #usage { height: 1; text-align: right; color: $text-muted; }
     #busy { height: 1; }
     #chat {
         height: 1fr;
@@ -464,6 +485,7 @@ class PipelineApp(App):
         self.pipeline = None
         self.pipeline_chat_id: str | None = None
         self.active_chat: str | None = None
+        self.show_thinking: bool = config.SHOW_THINKING  # thinking 표시 여부
 
     def on_mount(self):
         self.set_interval(0.1, self._poll_queue)
@@ -504,6 +526,8 @@ class PipelineApp(App):
             room.show_think(ev[1], ev[2])
         elif kind == "stream":
             room.show_stream(ev[1], ev[2])
+        elif kind == "usage":
+            room.show_usage(ev[1], ev[2], ev[3])
         elif kind == "question":
             room.show_question()
         elif kind == "error":
